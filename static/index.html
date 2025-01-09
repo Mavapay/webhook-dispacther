@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Webhook Forwarder</title>
+        <link rel="stylesheet" href="style.css" />
+    </head>
+    <body>
+        <div class="container">
+            <h1>Webhook Forwarder</h1>
+
+            <div class="add-webhook">
+                <h2>Add New Endpoint</h2>
+                <div class="input-group">
+                    <input
+                        type="text"
+                        id="webhookUrl"
+                        placeholder="Enter webhook URL (e.g., http://localhost:3000/webhook)"
+                    />
+                    <input
+                        type="text"
+                        id="webhookName"
+                        placeholder="Enter a name for this endpoint"
+                    />
+                    <button onclick="addEndpoint()">Add Endpoint</button>
+                </div>
+            </div>
+
+            <div class="webhook-list">
+                <h2>Registered Endpoints</h2>
+                <div id="endpointList" class="endpoint-list">
+                    <!-- Endpoints will be inserted here -->
+                </div>
+            </div>
+
+            <div class="webhook-info">
+                <h2>Webhook Information</h2>
+                <p>Send your webhooks to: <code id="webhookUrl"></code></p>
+                <pre class="code-block">
+curl -X POST http://localhost:8080/webhook \
+-H "Content-Type: application/json" \
+-d '{"event": "test", "data": "your payload here"}'</pre
+                >
+            </div>
+        </div>
+        <script src="app.js"></script>
+    </body>
+</html>
