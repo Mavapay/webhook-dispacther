@@ -3,12 +3,12 @@
     <head>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <title>Webhook Forwarder</title>
+        <title>Webhook Dispatcher</title>
         <link rel="stylesheet" href="style.css" />
     </head>
     <body>
         <div class="container">
-            <h1>Webhook Forwarder</h1>
+            <h1>Mavapay Webhook dispatcher</h1>
 
             <div class="add-webhook">
                 <h2>Add New Endpoint</h2>
@@ -16,7 +16,7 @@
                     <input
                         type="text"
                         id="webhookUrl"
-                        placeholder="Enter webhook URL (e.g., http://localhost:3000/webhook)"
+                        placeholder="Enter webhook URL (e.g., https://your-local-tunnel.com/webhook)"
                     />
                     <input
                         type="text"
@@ -38,7 +38,7 @@
                 <h2>Webhook Information</h2>
                 <p>Send your webhooks to: <code id="webhookUrl"></code></p>
                 <pre class="code-block">
-curl -X POST http://localhost:8080/webhook \
+curl -X POST https://webhook-origin.com/webhook \
 -H "Content-Type: application/json" \
 -d '{"event": "test", "data": "your payload here"}'</pre
                 >
