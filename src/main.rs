@@ -1,6 +1,8 @@
 use actix_cors::Cors;
 use actix_files;
+use actix_web::rt;
 use actix_web::{web, App, HttpResponse, HttpServer};
+use futures::future;
 use reqwest; // Using reqwest instead of awc for better thread safety
 use serde::{Deserialize, Serialize};
 use std::sync::RwLock;
@@ -115,14 +117,25 @@ async fn forward_webhook(
     endpoint: &WebhookEndpoint,
     payload: &WebhookEvent,
 ) -> Result<(), String> {
-    match client.post(&endpoint.url).json(&payload).send().await {
-        Ok(response) if response.status().is_success() => Ok(()),
-        Ok(response) => Err(format!(
-            "Failed to forward to {}: HTTP {}",
-            endpoint.name,
-            response.status()
-        )),
-        Err(e) => Err(format!("Error forwarding to {}: {}", endpoint.name, e)),
+    let response = client
+        .post(&endpoint.url)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to send request: {}", e))?;
+
+    let status = response.status();
+    if status.is_success() {
+        Ok(())
+    } else {
+        let error_body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "Unable to read error response".to_string());
+        Err(format!(
+            "Endpoint returned error status {}: {}",
+            status, error_body
+        ))
     }
 }
 
@@ -132,7 +145,8 @@ async fn receive_webhook(
     data: web::Data<AppState>,
 ) -> HttpResponse {
     let endpoints = data.endpoints.read().unwrap();
-    let active_endpoints: Vec<_> = endpoints.iter().filter(|e| e.is_active).collect();
+    let active_endpoints: Vec<WebhookEndpoint> =
+        endpoints.iter().filter(|e| e.is_active).cloned().collect();
 
     if active_endpoints.is_empty() {
         return HttpResponse::Ok().json(serde_json::json!({
@@ -141,26 +155,47 @@ async fn receive_webhook(
         }));
     }
 
-    let client = reqwest::Client::new();
-    let mut errors = Vec::new();
+    // Clone the payload for async processing
+    let payload_clone = payload.into_inner();
 
-    for endpoint in active_endpoints {
-        if let Err(error) = forward_webhook(&client, endpoint, &payload).await {
-            errors.push(error);
+    // Spawn a new task to process the webhook asynchronously
+    rt::spawn(async move {
+        let client = reqwest::Client::new();
+
+        // Process all endpoints concurrently using join_all
+        let futures: Vec<_> = active_endpoints
+            .into_iter() // Use into_iter() to take ownership
+            .map(|endpoint| {
+                let client = client.clone(); // Clone the client for each future
+                let payload = payload_clone.clone(); // Clone the payload for each future
+
+                async move {
+                    if let Err(error) = forward_webhook(&client, &endpoint, &payload).await {
+                        println!("Error forwarding to {}: {}", endpoint.name, error);
+                        (endpoint.name, error)
+                    } else {
+                        (endpoint.name, "Success".to_string())
+                    }
+                }
+            })
+            .collect();
+
+        // Wait for all forwarding attempts to complete
+        let results = future::join_all(futures).await;
+
+        // Log results
+        for (endpoint_name, result) in results {
+            if result != "Success" {
+                println!("  {}: {}", endpoint_name, result);
+            }
         }
-    }
+    });
 
-    if errors.is_empty() {
-        HttpResponse::Ok().json(serde_json::json!({
-            "status": "success",
-            "message": "Webhook forwarded to active endpoints"
-        }))
-    } else {
-        HttpResponse::InternalServerError().json(serde_json::json!({
-            "status": "error",
-            "errors": errors
-        }))
-    }
+    // Immediately return success response
+    HttpResponse::Ok().json(serde_json::json!({
+        "status": "accepted",
+        "message": "Webhook received and processing started"
+    }))
 }
 
 #[actix_web::main]
