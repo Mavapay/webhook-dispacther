@@ -143,11 +143,32 @@ async fn forward_webhook(
     endpoint: &WebhookEndpoint,
     payload: &WebhookEvent,
 ) -> Result<(), String> {
+    // Create a custom client that doesn't add a Host header automatically
     let mut request_builder = client.post(&endpoint.url).json(&payload.payload);
 
-    // Forward all original headers
+    // Get the URL hostname to set as Host header
+    let url = url::Url::parse(&endpoint.url).map_err(|e| format!("Failed to parse URL: {}", e))?;
+
+    let host = url
+        .host_str()
+        .ok_or_else(|| "URL has no host".to_string())?;
+
+    // Add the host's port to the Host header if present
+    let host_header = if let Some(port) = url.port() {
+        format!("{}:{}", host, port)
+    } else {
+        host.to_string()
+    };
+
+    // Set the proper Host header for the target URL
+    request_builder = request_builder.header("Host", host_header);
+
+    // Forward selected original headers, but skip the Host header
     for (header_name, header_value) in &payload.headers {
-        request_builder = request_builder.header(header_name, header_value);
+        // Skip the original Host header to avoid misdirected request errors
+        if header_name.to_lowercase() != "host" {
+            request_builder = request_builder.header(header_name, header_value);
+        }
     }
 
     let response = request_builder
@@ -157,6 +178,10 @@ async fn forward_webhook(
 
     let status = response.status();
     if status.is_success() {
+        println!(
+            "Successfully forwarded to {}: status {}",
+            endpoint.name, status
+        );
         Ok(())
     } else {
         let error_body = response
@@ -256,7 +281,10 @@ async fn receive_webhook(
 
     // Spawn a new task to process the webhook asynchronously
     rt::spawn(async move {
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true) // For testing to accept self-signed certs
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
 
         // Process all endpoints concurrently using join_all
         let futures: Vec<_> = active_endpoints
