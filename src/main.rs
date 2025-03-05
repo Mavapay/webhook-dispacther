@@ -1,16 +1,19 @@
 use actix_cors::Cors;
 use actix_files;
 use actix_web::rt;
-use actix_web::{web, App, HttpResponse, HttpServer};
+use actix_web::{web, App, HttpRequest, HttpResponse, HttpServer};
 use futures::future;
 use reqwest; // Using reqwest instead of awc for better thread safety
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::RwLock;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct WebhookEvent {
     #[serde(flatten)]
     payload: serde_json::Value,
+    #[serde(default)]
+    headers: HashMap<String, String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -117,9 +120,14 @@ async fn forward_webhook(
     endpoint: &WebhookEndpoint,
     payload: &WebhookEvent,
 ) -> Result<(), String> {
-    let response = client
-        .post(&endpoint.url)
-        .json(&payload)
+    let mut request_builder = client.post(&endpoint.url).json(&payload.payload);
+
+    // Forward all original headers
+    for (header_name, header_value) in &payload.headers {
+        request_builder = request_builder.header(header_name, header_value);
+    }
+
+    let response = request_builder
         .send()
         .await
         .map_err(|e| format!("Failed to send request: {}", e))?;
@@ -141,9 +149,24 @@ async fn forward_webhook(
 
 // Webhook receiver endpoint that forwards to active endpoints
 async fn receive_webhook(
-    payload: web::Json<WebhookEvent>,
+    payload: web::Json<serde_json::Value>,
+    req: HttpRequest,
     data: web::Data<AppState>,
 ) -> HttpResponse {
+    // Capture all headers from the original request
+    let mut headers = HashMap::new();
+    for (header_name, header_value) in req.headers() {
+        if let Ok(value_str) = header_value.to_str() {
+            headers.insert(header_name.to_string(), value_str.to_string());
+        }
+    }
+
+    // Create WebhookEvent with the payload and headers
+    let webhook_event = WebhookEvent {
+        payload: payload.into_inner(),
+        headers,
+    };
+
     let endpoints = data.endpoints.read().unwrap();
     let active_endpoints: Vec<WebhookEndpoint> =
         endpoints.iter().filter(|e| e.is_active).cloned().collect();
@@ -155,8 +178,8 @@ async fn receive_webhook(
         }));
     }
 
-    // Clone the payload for async processing
-    let payload_clone = payload.into_inner();
+    // Clone the webhook event for async processing
+    let webhook_event_clone = webhook_event.clone();
 
     // Spawn a new task to process the webhook asynchronously
     rt::spawn(async move {
@@ -167,7 +190,7 @@ async fn receive_webhook(
             .into_iter() // Use into_iter() to take ownership
             .map(|endpoint| {
                 let client = client.clone(); // Clone the client for each future
-                let payload = payload_clone.clone(); // Clone the payload for each future
+                let payload = webhook_event_clone.clone(); // Clone the payload for each future
 
                 async move {
                     if let Err(error) = forward_webhook(&client, &endpoint, &payload).await {
