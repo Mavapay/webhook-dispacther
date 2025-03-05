@@ -6,6 +6,8 @@ use futures::future;
 use reqwest; // Using reqwest instead of awc for better thread safety
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
 use std::sync::RwLock;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -74,6 +76,11 @@ async fn register_endpoint(
     let mut endpoints = data.endpoints.write().unwrap();
     endpoints.push(new_endpoint.clone());
 
+    // Save updated endpoints to persistent storage
+    if let Err(e) = save_endpoints(&endpoints) {
+        println!("Error saving endpoints: {}", e);
+    }
+
     HttpResponse::Ok().json(endpoints.clone())
 }
 
@@ -91,9 +98,19 @@ async fn update_endpoint(
 ) -> HttpResponse {
     let id = path.into_inner();
     let mut endpoints = data.endpoints.write().unwrap();
+
     if let Some(endpoint) = endpoints.iter_mut().find(|e| e.id == id) {
         endpoint.is_active = update.is_active;
-        HttpResponse::Ok().json(endpoint)
+
+        // Clone endpoint for response
+        let endpoint_clone = endpoint.clone();
+
+        // Save the updated endpoints
+        if let Err(e) = save_endpoints(&endpoints) {
+            println!("Error saving endpoints: {}", e);
+        }
+
+        HttpResponse::Ok().json(endpoint_clone)
     } else {
         HttpResponse::NotFound().finish()
     }
@@ -108,6 +125,12 @@ async fn delete_endpoint(
     let mut endpoints = data.endpoints.write().unwrap();
     if let Some(pos) = endpoints.iter().position(|e| e.id == id) {
         endpoints.remove(pos);
+
+        // Save the updated endpoints
+        if let Err(e) = save_endpoints(&endpoints) {
+            println!("Error saving endpoints: {}", e);
+        }
+
         HttpResponse::Ok().json(endpoints.clone())
     } else {
         HttpResponse::NotFound().finish()
@@ -145,6 +168,56 @@ async fn forward_webhook(
             status, error_body
         ))
     }
+}
+
+// New function to handle specific webhook paths
+async fn handle_specific_webhook(
+    path: web::Path<String>,
+    payload: web::Json<serde_json::Value>,
+    req: HttpRequest,
+) -> HttpResponse {
+    let service = path.into_inner();
+    let destination_url = match service.as_str() {
+        "fincra" => "https://staging.webhook.api.mavapay.co/webhook/fincra",
+        "splice" => "https://staging.webhook.api.mavapay.co/webhook/splice",
+        "useorange" => "https://staging.webhook.api.mavapay.co/webhook/useorange",
+        "galoy" => "https://staging.webhook.api.mavapay.co/webhook/galoy",
+        _ => return HttpResponse::NotFound().finish(),
+    };
+
+    // Capture all headers from the original request
+    let mut headers = HashMap::new();
+    for (header_name, header_value) in req.headers() {
+        if let Ok(value_str) = header_value.to_str() {
+            headers.insert(header_name.to_string(), value_str.to_string());
+        }
+    }
+
+    // Create WebhookEvent with the payload and headers
+    let webhook_event = WebhookEvent {
+        payload: payload.into_inner(),
+        headers,
+    };
+
+    // Forward the webhook asynchronously
+    rt::spawn(async move {
+        let client = reqwest::Client::new();
+        let endpoint = WebhookEndpoint {
+            id: service.clone(),
+            url: destination_url.to_string(),
+            name: format!("Static {} endpoint", service),
+            is_active: true,
+        };
+
+        if let Err(error) = forward_webhook(&client, &endpoint, &webhook_event).await {
+            println!("Error forwarding to {}: {}", service, error);
+        }
+    });
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "status": "accepted",
+        "message": "Webhook received and processing started"
+    }))
 }
 
 // Webhook receiver endpoint that forwards to active endpoints
@@ -221,6 +294,65 @@ async fn receive_webhook(
     }))
 }
 
+// Save endpoints to a JSON file
+fn save_endpoints(endpoints: &[WebhookEndpoint]) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(endpoints)
+        .map_err(|e| format!("Failed to serialize endpoints: {}", e))?;
+
+    fs::write("endpoints.json", json).map_err(|e| format!("Failed to write endpoints file: {}", e))
+}
+
+// Load endpoints from a JSON file
+fn load_endpoints() -> Vec<WebhookEndpoint> {
+    if Path::new("endpoints.json").exists() {
+        match fs::read_to_string("endpoints.json") {
+            Ok(contents) => match serde_json::from_str::<Vec<WebhookEndpoint>>(&contents) {
+                Ok(endpoints) => {
+                    println!("Loaded {} endpoints from file", endpoints.len());
+                    return endpoints;
+                }
+                Err(e) => println!("Error parsing endpoints file: {}", e),
+            },
+            Err(e) => println!("Error reading endpoints file: {}", e),
+        }
+    }
+
+    // Return default endpoints with our staging URLs
+    let default_endpoints = vec![
+        WebhookEndpoint {
+            id: "fincra".to_string(),
+            url: "https://staging.webhook.api.mavapay.co/webhook/fincra".to_string(),
+            name: "Fincra Staging".to_string(),
+            is_active: true,
+        },
+        WebhookEndpoint {
+            id: "splice".to_string(),
+            url: "https://staging.webhook.api.mavapay.co/webhook/splice".to_string(),
+            name: "Splice Staging".to_string(),
+            is_active: true,
+        },
+        WebhookEndpoint {
+            id: "useorange".to_string(),
+            url: "https://staging.webhook.api.mavapay.co/webhook/useorange".to_string(),
+            name: "UseOrange Staging".to_string(),
+            is_active: true,
+        },
+        WebhookEndpoint {
+            id: "galoy".to_string(),
+            url: "https://staging.webhook.api.mavapay.co/webhook/galoy".to_string(),
+            name: "Galoy Staging".to_string(),
+            is_active: true,
+        },
+    ];
+
+    // Save the default endpoints
+    if let Err(e) = save_endpoints(&default_endpoints) {
+        println!("Error saving default endpoints: {}", e);
+    }
+
+    default_endpoints
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
@@ -228,8 +360,11 @@ async fn main() -> std::io::Result<()> {
 
     println!("Starting webhook relay server on {}", bind_address);
 
+    // Load endpoints from persistent storage
+    let endpoints = load_endpoints();
+
     let app_state = web::Data::new(AppState {
-        endpoints: RwLock::new(Vec::new()),
+        endpoints: RwLock::new(endpoints),
     });
 
     HttpServer::new(move || {
@@ -239,6 +374,10 @@ async fn main() -> std::io::Result<()> {
             .wrap(cors)
             .app_data(app_state.clone())
             .route("/webhook", web::post().to(receive_webhook))
+            .route(
+                "/webhook/{service}",
+                web::post().to(handle_specific_webhook),
+            )
             .route("/endpoints", web::post().to(register_endpoint))
             .route("/endpoints", web::get().to(list_endpoints))
             .route("/endpoints/{id}", web::delete().to(delete_endpoint))
